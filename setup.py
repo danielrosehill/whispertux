@@ -108,7 +108,7 @@ def install_system_dependencies(distro):
 
     if distro == 'debian':
         packages = [
-            'python3-pip', 'python3-dev', 'python3-venv',
+            'python3-pip', 'python3-dev', 'python3-venv', 'python3-tk'
             'portaudio19-dev', 'ydotool',
             'build-essential', 'cmake', 'git',
             'libasound2-dev', 'pkg-config'
