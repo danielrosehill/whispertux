@@ -144,6 +144,17 @@ The app scans these locations for models:
 3. Speak, then press again to stop
 4. Transcribed text is typed into the focused application (Live mode) or added to notes (Note mode)
 
+### Audio Feedback
+
+The app provides audio feedback beeps to indicate recording state (can be disabled in Settings):
+
+| Event | Frequency | Duration |
+|-------|-----------|----------|
+| Start recording | 1000 Hz | 100ms |
+| Stop recording | 600 Hz | 150ms |
+
+Both tones use a sine wave with ~11ms fade in/out to prevent clicks, at 25% amplitude.
+
 ### Operation Modes
 
 - **Live Text Entry**: Transcribed text is immediately typed into the currently focused application

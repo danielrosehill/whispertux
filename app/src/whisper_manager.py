@@ -235,10 +235,42 @@ class WhisperManager:
         """Get the current model name"""
         return self.current_model
     
+    def _get_display_name(self, internal_name: str) -> str:
+        """Convert internal model name to user-friendly display name"""
+        # Standard stock models - remove .en suffix and add "stock"
+        stock_models = ['tiny', 'base', 'small', 'medium', 'large', 'large-v2', 'large-v3', 'large-v3-turbo']
+
+        # Check if it's a stock model (with or without .en suffix)
+        base_name = internal_name.replace('.en', '')
+        if base_name in stock_models:
+            return f"{base_name} stock"
+
+        # Finetune models - convert "[Finetune] name" to "name - fine tune"
+        if internal_name.startswith('[Finetune] '):
+            finetune_name = internal_name[11:]  # Remove "[Finetune] " prefix
+            return f"{finetune_name} - fine tune"
+
+        # Custom models - keep as is
+        return internal_name
+
+    def _get_internal_name(self, display_name: str) -> str:
+        """Convert display name back to internal model name"""
+        # Stock models - remove "stock" suffix
+        if display_name.endswith(' stock'):
+            return display_name[:-6]  # Remove " stock"
+
+        # Finetune models - convert "name - fine tune" to "[Finetune] name"
+        if display_name.endswith(' - fine tune'):
+            finetune_name = display_name[:-12]  # Remove " - fine tune"
+            return f"[Finetune] {finetune_name}"
+
+        return display_name
+
     def get_available_models(self) -> list:
         """Get list of available whisper models from all configured directories"""
         available_models = []
         model_paths = {}  # Track paths for display
+        internal_to_display = {}  # Map internal names to display names
 
         # Get all model directories from config
         model_dirs = self.config.get_model_directories()
@@ -260,18 +292,24 @@ class WhisperManager:
 
                 for model_file in model_files:
                     if model_file.exists():
+                        # Internal name for storage (e.g., "tiny" or "tiny.en")
                         if model_file.name.endswith('.en.bin'):
-                            model_name = f"{model}.en"
+                            internal_name = f"{model}.en"
                         else:
-                            model_name = model
+                            internal_name = model
 
-                        if model_name not in available_models:
-                            available_models.append(model_name)
-                            model_paths[model_name] = str(model_file)
+                        # Display name for UI (e.g., "tiny stock")
+                        display_name = f"{model} stock"
+
+                        if display_name not in available_models:
+                            available_models.append(display_name)
+                            model_paths[display_name] = str(model_file)
+                            internal_to_display[internal_name] = display_name
                         break
 
             # Special handling for large-v3-turbo with alternate naming conventions
-            if 'large-v3-turbo' not in available_models:
+            turbo_display = 'large-v3-turbo stock'
+            if turbo_display not in available_models:
                 turbo_patterns = [
                     # Standard naming
                     model_dir / "ggml-large-v3-turbo.bin",
@@ -284,8 +322,9 @@ class WhisperManager:
                 ]
                 for turbo_file in turbo_patterns:
                     if turbo_file.exists():
-                        available_models.append('large-v3-turbo')
-                        model_paths['large-v3-turbo'] = str(turbo_file)
+                        available_models.append(turbo_display)
+                        model_paths[turbo_display] = str(turbo_file)
+                        internal_to_display['large-v3-turbo'] = turbo_display
                         break
 
             # Scan for finetune models in this directory
@@ -301,6 +340,7 @@ class WhisperManager:
 
         # Store model paths for reference
         self._model_paths = model_paths
+        self._internal_to_display = internal_to_display
 
         return available_models
 
