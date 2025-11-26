@@ -16,7 +16,9 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QTextEdit, QFrame, QComboBox, QDialog,
     QScrollArea, QLineEdit, QCheckBox, QSpinBox, QMessageBox,
     QFileDialog, QListWidget, QListWidgetItem, QButtonGroup,
-    QRadioButton, QGroupBox, QSizePolicy, QSystemTrayIcon, QMenu
+    QRadioButton, QGroupBox, QSizePolicy, QSystemTrayIcon, QMenu,
+    QProgressBar, QTableWidget, QTableWidgetItem, QHeaderView,
+    QAbstractItemView, QStackedWidget
 )
 from PySide6.QtCore import Qt, QTimer, Signal, QObject, QSize
 from PySide6.QtGui import (
@@ -29,6 +31,10 @@ from src.whisper_manager import WhisperManager
 from src.text_injector import TextInjector
 from src.config_manager import ConfigManager
 from src.global_shortcuts import GlobalShortcuts, get_available_keyboards
+from src.benchmark import (
+    WhisperBenchmark, BENCHMARK_SAMPLES, BenchmarkResult, ModelSummary,
+    calculate_wer, calculate_efficiency_score
+)
 
 
 # Color scheme
@@ -492,16 +498,838 @@ class SignalEmitter(QObject):
     pause_state = Signal(bool)  # True = paused, False = resumed
 
 
+class BenchmarkDialog(QDialog):
+    """Dialog for running model benchmarks"""
+
+    # Signals for thread-safe UI updates
+    class BenchmarkSignals(QObject):
+        sample_started = Signal(int, str)  # sample_index, sample_text
+        recording_started = Signal()
+        recording_stopped = Signal(float)  # duration
+        transcription_progress = Signal(str, int, int)  # model_name, current, total
+        transcription_result = Signal(str, float, float)  # model_name, wer, time
+        benchmark_complete = Signal(dict)  # summaries
+        error = Signal(str)
+
+    def __init__(self, parent, config: ConfigManager, whisper_manager: WhisperManager,
+                 audio_capture: AudioCapture):
+        super().__init__(parent)
+        self.config = config
+        self.whisper_manager = whisper_manager
+        self.audio_capture = audio_capture
+
+        self.setWindowTitle("Model Benchmark")
+        self.setMinimumSize(800, 700)
+        self.setModal(True)
+
+        # Benchmark state
+        self.is_running = False
+        self.is_recording = False
+        self.current_sample_index = 0
+        self.samples = []
+        self.recordings = []  # List of (audio_data, duration, sample)
+        self.selected_models = []
+        self.results = []
+        self.summaries = {}
+
+        # Signals
+        self.signals = self.BenchmarkSignals()
+        self.signals.sample_started.connect(self._on_sample_started)
+        self.signals.recording_started.connect(self._on_recording_started)
+        self.signals.recording_stopped.connect(self._on_recording_stopped)
+        self.signals.transcription_progress.connect(self._on_transcription_progress)
+        self.signals.transcription_result.connect(self._on_transcription_result)
+        self.signals.benchmark_complete.connect(self._on_benchmark_complete)
+        self.signals.error.connect(self._on_error)
+
+        # Audio monitoring timer
+        self.audio_timer = QTimer()
+        self.audio_timer.timeout.connect(self._update_audio_level)
+
+        self._setup_ui()
+        self._load_models()
+
+    def _setup_ui(self):
+        """Set up the benchmark dialog UI"""
+        layout = QVBoxLayout(self)
+        layout.setSpacing(16)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        # Title
+        title = QLabel("Model Benchmark")
+        title.setObjectName("title")
+        title.setStyleSheet(f"font-size: 20px; font-weight: bold; color: {COLORS['primary']};")
+        layout.addWidget(title)
+
+        subtitle = QLabel("Test your models to find the optimal balance between accuracy and speed")
+        subtitle.setStyleSheet(f"color: {COLORS['text_dim']}; margin-bottom: 10px;")
+        layout.addWidget(subtitle)
+
+        # Stacked widget for different stages
+        self.stack = QStackedWidget()
+        layout.addWidget(self.stack, 1)
+
+        # Page 0: Setup
+        self.setup_page = self._create_setup_page()
+        self.stack.addWidget(self.setup_page)
+
+        # Page 1: Recording
+        self.recording_page = self._create_recording_page()
+        self.stack.addWidget(self.recording_page)
+
+        # Page 2: Processing
+        self.processing_page = self._create_processing_page()
+        self.stack.addWidget(self.processing_page)
+
+        # Page 3: Results
+        self.results_page = self._create_results_page()
+        self.stack.addWidget(self.results_page)
+
+        # Bottom buttons
+        self.button_layout = QHBoxLayout()
+
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self._on_cancel)
+        self.button_layout.addWidget(self.cancel_btn)
+
+        self.button_layout.addStretch()
+
+        self.back_btn = QPushButton("Back")
+        self.back_btn.clicked.connect(self._go_back)
+        self.back_btn.setVisible(False)
+        self.button_layout.addWidget(self.back_btn)
+
+        self.next_btn = QPushButton("Start Benchmark")
+        self.next_btn.setObjectName("primary")
+        self.next_btn.clicked.connect(self._on_next)
+        self.button_layout.addWidget(self.next_btn)
+
+        layout.addLayout(self.button_layout)
+
+    def _create_setup_page(self):
+        """Create the setup/configuration page"""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setSpacing(16)
+
+        # Model selection
+        models_group = QGroupBox("Select Models to Test")
+        models_layout = QVBoxLayout(models_group)
+
+        self.models_list = QListWidget()
+        self.models_list.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
+        self.models_list.setMaximumHeight(200)
+        models_layout.addWidget(self.models_list)
+
+        select_btns = QHBoxLayout()
+        select_all_btn = QPushButton("Select All")
+        select_all_btn.clicked.connect(lambda: self._select_all_models(True))
+        select_btns.addWidget(select_all_btn)
+
+        select_none_btn = QPushButton("Select None")
+        select_none_btn.clicked.connect(lambda: self._select_all_models(False))
+        select_btns.addWidget(select_none_btn)
+
+        select_btns.addStretch()
+        models_layout.addLayout(select_btns)
+
+        layout.addWidget(models_group)
+
+        # Sample count selection
+        samples_group = QGroupBox("Number of Samples")
+        samples_layout = QHBoxLayout(samples_group)
+
+        samples_layout.addWidget(QLabel("Record"))
+        self.samples_spin = QSpinBox()
+        self.samples_spin.setRange(1, 10)
+        self.samples_spin.setValue(3)
+        samples_layout.addWidget(self.samples_spin)
+        samples_layout.addWidget(QLabel("text samples (each ~25 seconds)"))
+        samples_layout.addStretch()
+
+        layout.addWidget(samples_group)
+
+        # Instructions
+        instructions = QLabel(
+            "How it works:\n"
+            "1. You'll see text samples to read aloud\n"
+            "2. Press the Record button and read the text\n"
+            "3. Each recording is tested against all selected models\n"
+            "4. Results show WER (accuracy) and inference time for each model\n"
+            "5. A recommendation is provided based on the efficiency score"
+        )
+        instructions.setStyleSheet(f"color: {COLORS['text_dim']}; padding: 10px; "
+                                   f"background-color: {COLORS['surface']}; border-radius: 8px;")
+        instructions.setWordWrap(True)
+        layout.addWidget(instructions)
+
+        layout.addStretch()
+        return page
+
+    def _create_recording_page(self):
+        """Create the recording page"""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setSpacing(16)
+
+        # Progress
+        progress_layout = QHBoxLayout()
+        self.sample_progress_label = QLabel("Sample 1 of 3")
+        self.sample_progress_label.setStyleSheet(f"font-size: 14px; color: {COLORS['text']};")
+        progress_layout.addWidget(self.sample_progress_label)
+        progress_layout.addStretch()
+        layout.addLayout(progress_layout)
+
+        # Category label
+        self.category_label = QLabel("Category: everyday_narrative")
+        self.category_label.setStyleSheet(f"color: {COLORS['text_dim']};")
+        layout.addWidget(self.category_label)
+
+        # Text to read
+        text_group = QGroupBox("Read This Text Aloud")
+        text_layout = QVBoxLayout(text_group)
+
+        self.sample_text = QTextEdit()
+        self.sample_text.setReadOnly(True)
+        self.sample_text.setMinimumHeight(150)
+        self.sample_text.setStyleSheet(f"""
+            QTextEdit {{
+                font-size: 16px;
+                line-height: 1.6;
+                padding: 15px;
+                background-color: {COLORS['surface']};
+                border: 2px solid {COLORS['primary']};
+                border-radius: 8px;
+            }}
+        """)
+        text_layout.addWidget(self.sample_text)
+
+        layout.addWidget(text_group)
+
+        # Audio level meter
+        level_layout = QHBoxLayout()
+        level_layout.addWidget(QLabel("Audio Level:"))
+        self.benchmark_audio_meter = AudioLevelWidget()
+        level_layout.addWidget(self.benchmark_audio_meter, 1)
+        layout.addLayout(level_layout)
+
+        # Recording status
+        self.recording_status = QLabel("Press Record when ready")
+        self.recording_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.recording_status.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {COLORS['text']};")
+        layout.addWidget(self.recording_status)
+
+        # Record button
+        self.record_btn = QPushButton("⏺ Start Recording")
+        self.record_btn.setMinimumHeight(50)
+        self.record_btn.setStyleSheet(f"""
+            QPushButton {{
+                font-size: 18px;
+                background-color: {COLORS['success']};
+                color: {COLORS['background']};
+                border-radius: 8px;
+            }}
+            QPushButton:hover {{
+                background-color: #8bd49a;
+            }}
+        """)
+        self.record_btn.clicked.connect(self._toggle_recording)
+        layout.addWidget(self.record_btn)
+
+        # Recorded duration display
+        self.duration_label = QLabel("")
+        self.duration_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.duration_label.setStyleSheet(f"color: {COLORS['text_dim']};")
+        layout.addWidget(self.duration_label)
+
+        layout.addStretch()
+        return page
+
+    def _create_processing_page(self):
+        """Create the processing/transcription page"""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setSpacing(16)
+
+        # Status
+        self.processing_status = QLabel("Running transcriptions...")
+        self.processing_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.processing_status.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {COLORS['warning']};")
+        layout.addWidget(self.processing_status)
+
+        # Progress bar
+        self.processing_progress = QProgressBar()
+        self.processing_progress.setMinimum(0)
+        self.processing_progress.setStyleSheet(f"""
+            QProgressBar {{
+                border: 1px solid {COLORS['border']};
+                border-radius: 5px;
+                text-align: center;
+                background-color: {COLORS['surface']};
+            }}
+            QProgressBar::chunk {{
+                background-color: {COLORS['primary']};
+                border-radius: 4px;
+            }}
+        """)
+        layout.addWidget(self.processing_progress)
+
+        # Current model being tested
+        self.current_model_label = QLabel("Testing: ")
+        self.current_model_label.setStyleSheet(f"color: {COLORS['text_dim']};")
+        layout.addWidget(self.current_model_label)
+
+        # Live results table
+        self.live_results_table = QTableWidget()
+        self.live_results_table.setColumnCount(4)
+        self.live_results_table.setHorizontalHeaderLabels(["Model", "Sample", "WER", "Time (s)"])
+        self.live_results_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.live_results_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        layout.addWidget(self.live_results_table, 1)
+
+        return page
+
+    def _create_results_page(self):
+        """Create the results page"""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setSpacing(16)
+
+        # Recommendation card
+        self.recommendation_card = QFrame()
+        self.recommendation_card.setObjectName("card")
+        self.recommendation_card.setStyleSheet(f"""
+            QFrame#card {{
+                background-color: {COLORS['surface']};
+                border: 2px solid {COLORS['success']};
+                border-radius: 12px;
+                padding: 16px;
+            }}
+        """)
+        rec_layout = QVBoxLayout(self.recommendation_card)
+
+        rec_title = QLabel("⭐ Recommended Model")
+        rec_title.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {COLORS['success']};")
+        rec_layout.addWidget(rec_title)
+
+        self.recommendation_model = QLabel("")
+        self.recommendation_model.setStyleSheet(f"font-size: 20px; font-weight: bold; color: {COLORS['text']};")
+        rec_layout.addWidget(self.recommendation_model)
+
+        self.recommendation_reason = QLabel("")
+        self.recommendation_reason.setWordWrap(True)
+        self.recommendation_reason.setStyleSheet(f"color: {COLORS['text_dim']};")
+        rec_layout.addWidget(self.recommendation_reason)
+
+        layout.addWidget(self.recommendation_card)
+
+        # Results table
+        results_label = QLabel("Full Results")
+        results_label.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {COLORS['text']};")
+        layout.addWidget(results_label)
+
+        self.results_table = QTableWidget()
+        self.results_table.setColumnCount(5)
+        self.results_table.setHorizontalHeaderLabels(["Rank", "Model", "WER", "RTF", "Efficiency"])
+        self.results_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.results_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.results_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        layout.addWidget(self.results_table, 1)
+
+        # Legend
+        legend = QLabel(
+            "WER = Word Error Rate (lower is better) | "
+            "RTF = Real-Time Factor (< 1.0 = faster than real-time) | "
+            "Efficiency = Combined score (higher is better)"
+        )
+        legend.setWordWrap(True)
+        legend.setStyleSheet(f"color: {COLORS['text_dim']}; font-size: 11px;")
+        layout.addWidget(legend)
+
+        # Action buttons
+        action_layout = QHBoxLayout()
+
+        self.apply_model_btn = QPushButton("Apply Recommended Model")
+        self.apply_model_btn.setObjectName("primary")
+        self.apply_model_btn.clicked.connect(self._apply_recommended_model)
+        action_layout.addWidget(self.apply_model_btn)
+
+        action_layout.addStretch()
+        layout.addLayout(action_layout)
+
+        return page
+
+    def _load_models(self):
+        """Load available models into the list"""
+        self.models_list.clear()
+        models = self.whisper_manager.get_available_models()
+
+        for model in models:
+            item = QListWidgetItem(model)
+            item.setSelected(True)  # Select all by default
+            self.models_list.addItem(item)
+
+    def _select_all_models(self, select: bool):
+        """Select or deselect all models"""
+        for i in range(self.models_list.count()):
+            self.models_list.item(i).setSelected(select)
+
+    def _on_next(self):
+        """Handle next button click"""
+        current_page = self.stack.currentIndex()
+
+        if current_page == 0:  # Setup page
+            self._start_benchmark()
+        elif current_page == 1:  # Recording page
+            if self.current_sample_index < len(self.samples) - 1:
+                self._next_sample()
+            else:
+                self._start_processing()
+        elif current_page == 3:  # Results page
+            self.accept()
+
+    def _go_back(self):
+        """Go back to previous page"""
+        current_page = self.stack.currentIndex()
+        if current_page > 0:
+            self.stack.setCurrentIndex(current_page - 1)
+            self._update_buttons()
+
+    def _on_cancel(self):
+        """Handle cancel button"""
+        if self.is_recording:
+            self.audio_capture.stop_recording()
+            self.audio_timer.stop()
+            self.is_recording = False
+
+        self.is_running = False
+        self.reject()
+
+    def _update_buttons(self):
+        """Update button states based on current page"""
+        current_page = self.stack.currentIndex()
+
+        if current_page == 0:  # Setup
+            self.back_btn.setVisible(False)
+            self.next_btn.setText("Start Benchmark")
+            self.next_btn.setEnabled(True)
+            self.cancel_btn.setText("Cancel")
+        elif current_page == 1:  # Recording
+            self.back_btn.setVisible(False)  # Can't go back during recording
+            if self.current_sample_index < len(self.samples) - 1:
+                self.next_btn.setText("Next Sample")
+            else:
+                self.next_btn.setText("Run Transcriptions")
+            self.next_btn.setEnabled(len(self.recordings) > self.current_sample_index)
+            self.cancel_btn.setText("Cancel")
+        elif current_page == 2:  # Processing
+            self.back_btn.setVisible(False)
+            self.next_btn.setVisible(False)
+            self.cancel_btn.setText("Cancel")
+        elif current_page == 3:  # Results
+            self.back_btn.setVisible(False)
+            self.next_btn.setText("Close")
+            self.next_btn.setVisible(True)
+            self.next_btn.setEnabled(True)
+            self.cancel_btn.setVisible(False)
+
+    def _start_benchmark(self):
+        """Start the benchmark process"""
+        # Get selected models
+        self.selected_models = [
+            self.models_list.item(i).text()
+            for i in range(self.models_list.count())
+            if self.models_list.item(i).isSelected()
+        ]
+
+        if not self.selected_models:
+            QMessageBox.warning(self, "No Models", "Please select at least one model to test.")
+            return
+
+        # Get samples
+        num_samples = self.samples_spin.value()
+        import random
+        self.samples = BENCHMARK_SAMPLES.copy()
+        random.shuffle(self.samples)
+        self.samples = self.samples[:num_samples]
+
+        # Reset state
+        self.recordings = []
+        self.results = []
+        self.current_sample_index = 0
+        self.is_running = True
+
+        # Switch to recording page
+        self.stack.setCurrentIndex(1)
+        self._show_current_sample()
+        self._update_buttons()
+
+    def _show_current_sample(self):
+        """Display the current sample to record"""
+        if self.current_sample_index >= len(self.samples):
+            return
+
+        sample = self.samples[self.current_sample_index]
+
+        self.sample_progress_label.setText(
+            f"Sample {self.current_sample_index + 1} of {len(self.samples)}"
+        )
+        self.category_label.setText(f"Category: {sample['category']}")
+        self.sample_text.setText(sample['text'])
+        self.recording_status.setText("Press Record when ready")
+        self.recording_status.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {COLORS['text']};")
+        self.duration_label.setText(f"Estimated reading time: ~{sample['estimated_seconds']} seconds")
+
+        # Reset record button
+        self.record_btn.setText("⏺ Start Recording")
+        self.record_btn.setStyleSheet(f"""
+            QPushButton {{
+                font-size: 18px;
+                background-color: {COLORS['success']};
+                color: {COLORS['background']};
+                border-radius: 8px;
+            }}
+            QPushButton:hover {{
+                background-color: #8bd49a;
+            }}
+        """)
+
+        # Disable next until recorded
+        self.next_btn.setEnabled(len(self.recordings) > self.current_sample_index)
+
+    def _toggle_recording(self):
+        """Toggle recording state"""
+        if self.is_recording:
+            self._stop_recording()
+        else:
+            self._start_recording()
+
+    def _start_recording(self):
+        """Start recording audio"""
+        self.is_recording = True
+
+        # Update UI
+        self.record_btn.setText("⏹ Stop Recording")
+        self.record_btn.setStyleSheet(f"""
+            QPushButton {{
+                font-size: 18px;
+                background-color: {COLORS['error']};
+                color: {COLORS['background']};
+                border-radius: 8px;
+            }}
+            QPushButton:hover {{
+                background-color: #e57a96;
+            }}
+        """)
+        self.recording_status.setText("Recording...")
+        self.recording_status.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {COLORS['error']};")
+
+        # Start audio capture
+        self.benchmark_audio_meter.set_recording(True)
+        self.audio_timer.start(50)
+
+        def do_record():
+            try:
+                self.audio_capture.start_recording()
+            except Exception as e:
+                self.signals.error.emit(str(e))
+
+        threading.Thread(target=do_record, daemon=True).start()
+
+    def _stop_recording(self):
+        """Stop recording and save the audio"""
+        self.is_recording = False
+
+        # Stop audio capture
+        self.audio_timer.stop()
+        self.benchmark_audio_meter.set_recording(False)
+
+        def process_recording():
+            try:
+                audio_data = self.audio_capture.stop_recording()
+
+                if audio_data is not None and len(audio_data) > 0:
+                    duration = len(audio_data) / 16000.0
+                    sample = self.samples[self.current_sample_index]
+
+                    self.recordings.append({
+                        'audio_data': audio_data,
+                        'duration': duration,
+                        'sample': sample
+                    })
+
+                    self.signals.recording_stopped.emit(duration)
+                else:
+                    self.signals.error.emit("No audio captured")
+
+            except Exception as e:
+                self.signals.error.emit(str(e))
+
+        threading.Thread(target=process_recording, daemon=True).start()
+
+        # Update UI immediately
+        self.record_btn.setText("⏺ Re-record")
+        self.record_btn.setStyleSheet(f"""
+            QPushButton {{
+                font-size: 18px;
+                background-color: {COLORS['warning']};
+                color: {COLORS['background']};
+                border-radius: 8px;
+            }}
+            QPushButton:hover {{
+                background-color: #e5d09e;
+            }}
+        """)
+        self.recording_status.setText("Processing...")
+        self.recording_status.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {COLORS['warning']};")
+
+    def _update_audio_level(self):
+        """Update the audio level meter"""
+        level = self.audio_capture.get_audio_level()
+        self.benchmark_audio_meter.set_level(level)
+
+    def _on_recording_stopped(self, duration: float):
+        """Handle recording stopped"""
+        self.recording_status.setText(f"Recorded {duration:.1f} seconds")
+        self.recording_status.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {COLORS['success']};")
+        self.duration_label.setText(f"Recording complete: {duration:.1f}s")
+
+        # Enable next button
+        self.next_btn.setEnabled(True)
+
+    def _next_sample(self):
+        """Move to the next sample"""
+        self.current_sample_index += 1
+        self._show_current_sample()
+        self._update_buttons()
+
+    def _start_processing(self):
+        """Start processing all recordings through all models"""
+        self.stack.setCurrentIndex(2)
+        self._update_buttons()
+
+        # Clear live results table
+        self.live_results_table.setRowCount(0)
+
+        # Calculate total operations
+        total_ops = len(self.recordings) * len(self.selected_models)
+        self.processing_progress.setMaximum(total_ops)
+        self.processing_progress.setValue(0)
+
+        def run_transcriptions():
+            import time
+            operation_count = 0
+            all_results = []
+
+            for model in self.selected_models:
+                self.signals.transcription_progress.emit(model, 0, len(self.recordings))
+
+                # Switch model
+                if not self.whisper_manager.set_model(model):
+                    continue
+
+                for rec in self.recordings:
+                    if not self.is_running:
+                        return
+
+                    sample = rec['sample']
+                    audio_data = rec['audio_data']
+                    duration = rec['duration']
+
+                    # Time the transcription
+                    start_time = time.perf_counter()
+                    transcribed = self.whisper_manager.transcribe_audio(audio_data)
+                    end_time = time.perf_counter()
+
+                    inference_time = end_time - start_time
+                    wer = calculate_wer(sample['text'], transcribed)
+                    rtf = inference_time / duration if duration > 0 else 0
+
+                    result = BenchmarkResult(
+                        model_name=model,
+                        sample_id=sample['id'],
+                        reference_text=sample['text'],
+                        transcribed_text=transcribed,
+                        word_error_rate=wer,
+                        inference_time_seconds=inference_time,
+                        audio_duration_seconds=duration,
+                        real_time_factor=rtf,
+                        timestamp=""
+                    )
+                    all_results.append(result)
+
+                    operation_count += 1
+                    self.signals.transcription_result.emit(model, wer, inference_time)
+
+            # Calculate summaries
+            summaries = self._calculate_summaries(all_results)
+            self.results = all_results
+            self.summaries = summaries
+
+            self.signals.benchmark_complete.emit(summaries)
+
+        self.is_running = True
+        threading.Thread(target=run_transcriptions, daemon=True).start()
+
+    def _calculate_summaries(self, results):
+        """Calculate summary statistics for each model"""
+        import numpy as np
+        from dataclasses import asdict
+
+        by_model = {}
+        for r in results:
+            if r.model_name not in by_model:
+                by_model[r.model_name] = []
+            by_model[r.model_name].append(r)
+
+        summaries = {}
+
+        for model_name, model_results in by_model.items():
+            wers = [r.word_error_rate for r in model_results]
+            times = [r.inference_time_seconds for r in model_results]
+            rtfs = [r.real_time_factor for r in model_results]
+            durations = [r.audio_duration_seconds for r in model_results]
+
+            avg_wer = np.mean(wers)
+            avg_time = np.mean(times)
+            avg_rtf = np.mean(rtfs)
+            avg_duration = np.mean(durations)
+
+            efficiency = calculate_efficiency_score(avg_wer, avg_time, avg_duration)
+
+            summaries[model_name] = ModelSummary(
+                model_name=model_name,
+                average_wer=avg_wer,
+                std_wer=np.std(wers) if len(wers) > 1 else 0.0,
+                average_inference_time=avg_time,
+                std_inference_time=np.std(times) if len(times) > 1 else 0.0,
+                average_rtf=avg_rtf,
+                samples_tested=len(model_results),
+                efficiency_score=efficiency,
+                recommendation_rank=0
+            )
+
+        # Rank by efficiency
+        ranked = sorted(summaries.values(), key=lambda s: s.efficiency_score, reverse=True)
+        for i, summary in enumerate(ranked, 1):
+            summaries[summary.model_name].recommendation_rank = i
+
+        return summaries
+
+    def _on_sample_started(self, index: int, text: str):
+        """Handle sample started signal"""
+        pass
+
+    def _on_recording_started(self):
+        """Handle recording started signal"""
+        pass
+
+    def _on_transcription_progress(self, model: str, current: int, total: int):
+        """Handle transcription progress"""
+        self.current_model_label.setText(f"Testing: {model}")
+        self.processing_status.setText(f"Testing {model}...")
+
+    def _on_transcription_result(self, model: str, wer: float, time_s: float):
+        """Handle individual transcription result"""
+        # Add to live results table
+        row = self.live_results_table.rowCount()
+        self.live_results_table.insertRow(row)
+
+        self.live_results_table.setItem(row, 0, QTableWidgetItem(model))
+        self.live_results_table.setItem(row, 1, QTableWidgetItem(
+            f"Sample {(row % len(self.recordings)) + 1}"
+        ))
+        self.live_results_table.setItem(row, 2, QTableWidgetItem(f"{wer:.1%}"))
+        self.live_results_table.setItem(row, 3, QTableWidgetItem(f"{time_s:.2f}"))
+
+        # Update progress
+        current = self.processing_progress.value() + 1
+        self.processing_progress.setValue(current)
+
+        # Scroll to bottom
+        self.live_results_table.scrollToBottom()
+
+    def _on_benchmark_complete(self, summaries: dict):
+        """Handle benchmark completion"""
+        self.is_running = False
+
+        # Switch to results page
+        self.stack.setCurrentIndex(3)
+        self._update_buttons()
+
+        # Populate results table
+        self.results_table.setRowCount(0)
+        ranked = sorted(summaries.values(), key=lambda s: s.recommendation_rank)
+
+        for summary in ranked:
+            row = self.results_table.rowCount()
+            self.results_table.insertRow(row)
+
+            rank_item = QTableWidgetItem(str(summary.recommendation_rank))
+            rank_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.results_table.setItem(row, 0, rank_item)
+
+            self.results_table.setItem(row, 1, QTableWidgetItem(summary.model_name))
+
+            wer_item = QTableWidgetItem(f"{summary.average_wer:.1%}")
+            wer_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.results_table.setItem(row, 2, wer_item)
+
+            rtf_item = QTableWidgetItem(f"{summary.average_rtf:.2f}x")
+            rtf_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.results_table.setItem(row, 3, rtf_item)
+
+            eff_item = QTableWidgetItem(f"{summary.efficiency_score:.3f}")
+            eff_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.results_table.setItem(row, 4, eff_item)
+
+            # Highlight best row
+            if summary.recommendation_rank == 1:
+                for col in range(5):
+                    item = self.results_table.item(row, col)
+                    item.setBackground(QColor(COLORS['success']))
+                    item.setForeground(QColor(COLORS['background']))
+
+        # Update recommendation card
+        if ranked:
+            best = ranked[0]
+            self.recommendation_model.setText(best.model_name)
+            self.recommendation_reason.setText(
+                f"Efficiency Score: {best.efficiency_score:.3f}\n"
+                f"Word Error Rate: {best.average_wer:.1%}\n"
+                f"Real-Time Factor: {best.average_rtf:.2f}x "
+                f"({best.average_inference_time:.2f}s average)"
+            )
+            self._recommended_model = best.model_name
+
+    def _on_error(self, error: str):
+        """Handle error signal"""
+        QMessageBox.critical(self, "Error", f"Benchmark error: {error}")
+
+    def _apply_recommended_model(self):
+        """Apply the recommended model as the current model"""
+        if hasattr(self, '_recommended_model'):
+            self.config.set_setting('model', self._recommended_model)
+            self.whisper_manager.set_model(self._recommended_model)
+            self.config.save_config()
+            QMessageBox.information(
+                self, "Model Applied",
+                f"'{self._recommended_model}' is now your active model."
+            )
+
+
 class SettingsDialog(QDialog):
     """Settings dialog for WhisperTux"""
 
     def __init__(self, parent, config: ConfigManager, global_shortcuts: GlobalShortcuts,
-                 whisper_manager: WhisperManager, update_callback):
+                 whisper_manager: WhisperManager, update_callback, audio_capture: AudioCapture = None):
         super().__init__(parent)
         self.config = config
         self.global_shortcuts = global_shortcuts
         self.whisper_manager = whisper_manager
         self.update_callback = update_callback
+        self.audio_capture = audio_capture
+        self.parent_window = parent
 
         self.setWindowTitle("WhisperTux Settings")
         self.setMinimumSize(550, 700)
@@ -721,7 +1549,46 @@ class SettingsDialog(QDialog):
         add_custom_btn.clicked.connect(self._add_custom_model)
         layout.addWidget(add_custom_btn)
 
+        # Benchmark button
+        benchmark_btn = QPushButton("🔬 Run Model Benchmark")
+        benchmark_btn.setToolTip("Test all models to find the best one for your hardware")
+        benchmark_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {COLORS['primary']};
+                color: {COLORS['background']};
+                font-weight: bold;
+                padding: 12px;
+            }}
+            QPushButton:hover {{
+                background-color: {COLORS['primary_dark']};
+            }}
+        """)
+        benchmark_btn.clicked.connect(self._show_benchmark_dialog)
+        layout.addWidget(benchmark_btn)
+
         return group
+
+    def _show_benchmark_dialog(self):
+        """Show the benchmark dialog"""
+        if self.audio_capture is None:
+            QMessageBox.warning(
+                self, "Audio Not Available",
+                "Audio capture is not available. Cannot run benchmark."
+            )
+            return
+
+        dialog = BenchmarkDialog(
+            self, self.config, self.whisper_manager, self.audio_capture
+        )
+        result = dialog.exec()
+
+        if result == QDialog.DialogCode.Accepted:
+            # Refresh the model list and update display
+            self._refresh_model_list()
+            current_model = self.config.get_setting('model')
+            idx = self.model_combo.findText(current_model)
+            if idx >= 0:
+                self.model_combo.setCurrentIndex(idx)
 
     def _on_model_changed(self, model_name: str):
         """Update model path display when selection changes"""
@@ -1699,7 +2566,8 @@ class WhisperTuxApp(QMainWindow):
     def _show_settings(self):
         """Show settings dialog"""
         dialog = SettingsDialog(self, self.config, self.global_shortcuts,
-                                 self.whisper_manager, self._update_displays)
+                                 self.whisper_manager, self._update_displays,
+                                 self.audio_capture)
         dialog.exec()
 
     def _update_displays(self):
