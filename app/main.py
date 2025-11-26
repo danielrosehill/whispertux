@@ -221,9 +221,39 @@ def get_stylesheet():
             font-size: 13px;
         }}
 
+        QSpinBox::up-button, QSpinBox::down-button {{
+            background-color: {COLORS['surface_light']};
+            border: none;
+            width: 20px;
+        }}
+
+        QSpinBox::up-arrow {{
+            image: none;
+            border-left: 5px solid transparent;
+            border-right: 5px solid transparent;
+            border-bottom: 5px solid {COLORS['text']};
+            width: 0;
+            height: 0;
+        }}
+
+        QSpinBox::down-arrow {{
+            image: none;
+            border-left: 5px solid transparent;
+            border-right: 5px solid transparent;
+            border-top: 5px solid {COLORS['text']};
+            width: 0;
+            height: 0;
+        }}
+
+        QDialog QLabel {{
+            color: {COLORS['text']};
+            font-size: 13px;
+        }}
+
         QCheckBox {{
             font-size: 13px;
             spacing: 8px;
+            color: {COLORS['text']};
         }}
 
         QCheckBox::indicator {{
@@ -280,16 +310,21 @@ def get_stylesheet():
         QGroupBox {{
             font-size: 14px;
             font-weight: bold;
+            color: {COLORS['primary']};
             border: 1px solid {COLORS['border']};
             border-radius: 8px;
-            margin-top: 12px;
-            padding-top: 12px;
+            margin-top: 16px;
+            padding: 16px 12px 12px 12px;
         }}
 
         QGroupBox::title {{
             subcontrol-origin: margin;
+            subcontrol-position: top left;
             left: 12px;
+            top: 4px;
             padding: 0 8px;
+            background-color: {COLORS['background']};
+            color: {COLORS['primary']};
         }}
 
         QRadioButton {{
