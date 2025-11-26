@@ -232,10 +232,42 @@ def build_whisper_cpp():
         ):
             return False
 
+    # Allow forcing HIP build via env even if hipcc not on PATH
+    force_hip = os.environ.get("WHISPER_USE_HIP", "").lower() in ("1", "true", "yes", "on")
+
+    # Detect ROCm HIP for GPU acceleration
+    hipcc_path = shutil.which("hipcc") or shutil.which("/opt/rocm/bin/hipcc")
+    hip_flags = ""
+    if hipcc_path or force_hip:
+        if hipcc_path:
+            logger.info("HIP compiler detected - enabling ROCm acceleration for whisper.cpp", "BUILD")
+        else:
+            logger.warning("WHISPER_USE_HIP set but hipcc not found; attempting HIP build anyway", "BUILD")
+
+        # Try to detect GPU target; if detection fails, let cmake pick defaults
+        rocm_target = None
+        try:
+            result = subprocess.run(
+                ["rocminfo"], capture_output=True, text=True, timeout=10
+            )
+            if result.returncode == 0:
+                import re
+                matches = re.findall(r"Name:\\s*(gfx[0-9a-f]+)", result.stdout)
+                if matches:
+                    rocm_target = matches[0]
+        except Exception:
+            pass
+
+        hip_flags = "-DGGML_HIP=ON -DGGML_HIPBLAS=ON"
+        if rocm_target:
+            hip_flags += f" -DAMDGPU_TARGETS={rocm_target}"
+        else:
+            logger.warning("Could not auto-detect AMDGPU target; building with HIP defaults", "BUILD")
+
     # Build whisper.cpp
     build_commands = [
         f"cd {whisper_dir} && mkdir -p build",
-        f"cd {whisper_dir}/build && cmake ..",
+        f"cd {whisper_dir}/build && cmake .. {hip_flags}",
         f"cd {whisper_dir}/build && make -j$(nproc)"
     ]
 

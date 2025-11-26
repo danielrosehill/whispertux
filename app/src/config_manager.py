@@ -7,20 +7,30 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Dict, Optional
+import shutil
 
 
 class ConfigManager:
     """Manages application configuration and settings"""
     
     def __init__(self):
+        # Resolve project paths early for defaults
+        self.project_root = Path(__file__).resolve().parent.parent
+        self.local_models_dir = self.project_root / "whisper.cpp" / "models"
+        self.openai_whisper_dir = Path.home() / "ai" / "models" / "stt" / "openai-whisper" / "models"
+        self.local_whisper_binary = self.project_root / "whisper.cpp" / "build" / "bin" / "whisper-cli"
+
         # Default configuration values
         self.default_config = {
             'primary_shortcut': 'F13',
-            'model': 'base',
+            'model': 'large-v3',
             'custom_model_path': None,  # Direct path to a custom .bin model file
             'model_directories': [      # List of directories to scan for models
+                str(self.local_models_dir),
                 str(Path.home() / "ai" / "models" / "stt" / "whisper-cpp"),
+                str(self.openai_whisper_dir),
                 str(Path.home() / "ai" / "models" / "stt" / "finetunes"),
+                str(Path.home() / "ai" / "models" / "stt" / "by-program" / "dsnote"),  # Contains large-v3-turbo
             ],
             'key_delay': 15,  # Delay between keystrokes in milliseconds for ydotool
             'use_clipboard': False,
@@ -28,7 +38,9 @@ class ConfigManager:
             'always_on_top': True,
             'theme': 'darkly',
             'audio_device': None,  # None means use system default
-            'word_overrides': {}  # Dictionary of word replacements: {"original": "replacement"}
+            'word_overrides': {},  # Dictionary of word replacements: {"original": "replacement"}
+            'transcription_threads': max(1, os.cpu_count() // 2) if os.cpu_count() else 4,
+            'whisper_binary': None,  # Optional override for whisper-cli path
         }
         
         # Set up config directory and file path
@@ -168,9 +180,19 @@ class ConfigManager:
 
     def get_model_directories(self) -> list:
         """Get list of model directories"""
-        return self.config.get('model_directories', [
-            str(Path.home() / "ai" / "models" / "stt" / "whisper-cpp")
-        ])
+        dirs = self.config.get('model_directories', [])
+
+        # Ensure local whisper.cpp models directory is first if it exists
+        if self.local_models_dir.exists():
+            local_dir = str(self.local_models_dir)
+            if local_dir not in dirs:
+                dirs.insert(0, local_dir)
+
+        # Always return at least the default whisper.cpp location
+        if not dirs:
+            dirs = [str(Path.home() / "ai" / "models" / "stt" / "whisper-cpp")]
+
+        return dirs
 
     def add_model_directory(self, directory: str) -> bool:
         """Add a new directory to scan for models"""
@@ -210,9 +232,16 @@ class ConfigManager:
 
     def get_whisper_binary_path(self) -> Path:
         """Get the path to the whisper binary"""
-        import shutil
+        # 1) Explicit override from config
+        override_binary = self.config.get('whisper_binary')
+        if override_binary and Path(override_binary).exists():
+            return Path(override_binary)
 
-        # First check if whisper-cli is in PATH (preferred)
+        # 2) Local build inside the project (preferred for matching model dir)
+        if self.local_whisper_binary.exists():
+            return self.local_whisper_binary
+
+        # 3) whisper-cli in PATH
         whisper_cli = shutil.which("whisper-cli")
         if whisper_cli:
             return Path(whisper_cli)

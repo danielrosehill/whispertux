@@ -1,7 +1,7 @@
 #!/bin/bash
 # Update WhisperTux from git and rebuild/reinstall
 set -e
-
+ 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$SCRIPT_DIR"
 

@@ -1,10 +1,10 @@
 #!/bin/bash
 # WhisperTux Launcher Script
-cd "/home/cjams/dev/whispertux"
+cd "/home/daniel/programs/speech-voice/apps/forks/whispertux/app"
 
 # Check if virtual environment exists
-if [ -f "/home/cjams/dev/whispertux/venv/bin/python" ]; then
-    "/home/cjams/dev/whispertux/venv/bin/python" main.py "$@"
+if [ -f "/home/daniel/programs/speech-voice/apps/forks/whispertux/app/venv/bin/python" ]; then
+    "/home/daniel/programs/speech-voice/apps/forks/whispertux/app/venv/bin/python" main.py "$@"
 else
     echo "Error: Virtual environment not found. Please run setup.py first."
     echo "python3 setup.py"

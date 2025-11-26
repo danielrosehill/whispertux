@@ -40,6 +40,8 @@ class SettingsDialog:
         self.test_button = None
         self.apply_button = None
         self.current_shortcut_label = None
+        self.audio_device_options = []
+        self.audio_device_values = []
 
         self._create_dialog()
 
@@ -336,6 +338,50 @@ class SettingsDialog:
             width=10
         )
         key_delay_entry.pack(side=RIGHT)
+
+        # Microphone device selection
+        microphone_frame = ttk.Frame(general_frame)
+        microphone_frame.pack(fill=X, pady=(5, 5))
+
+        ttk.Label(microphone_frame, text="Microphone:").pack(side=LEFT)
+
+        # Discover available microphones
+        try:
+            available_mics = AudioCapture.get_available_input_devices()
+            mic_options = ["System Default"]
+            mic_values = [None]
+
+            for device in available_mics:
+                mic_options.append(device['display_name'])
+                mic_values.append(device['id'])
+
+            if not available_mics:
+                mic_options.append("No input devices found")
+                mic_values.append(None)
+        except Exception as e:
+            print(f"Error getting microphone devices: {e}")
+            mic_options = ["System Default"]
+            mic_values = [None]
+
+        self.audio_device_options = mic_options
+        self.audio_device_values = mic_values
+
+        # Find current selection
+        current_audio_device = self.config.get_setting('audio_device', None)
+        current_audio_index = 0
+        if current_audio_device in mic_values:
+            current_audio_index = mic_values.index(current_audio_device)
+
+        self.audio_device_var = tk.StringVar(value=mic_options[current_audio_index])
+        mic_combo_state = "readonly" if len(mic_options) > 1 else "disabled"
+        microphone_combo = ttk.Combobox(
+            microphone_frame,
+            textvariable=self.audio_device_var,
+            values=mic_options,
+            state=mic_combo_state,
+            width=35
+        )
+        microphone_combo.pack(side=RIGHT)
 
         # Keyboard device selection
         keyboard_frame = ttk.Frame(general_frame)
@@ -659,6 +705,11 @@ class SettingsDialog:
             # Get keyboard device selection
             selected_keyboard_index = self.keyboard_options.index(self.keyboard_device_var.get())
             selected_keyboard_path = self.keyboard_values[selected_keyboard_index]
+            # Get microphone selection
+            try:
+                selected_audio_index = self.audio_device_options.index(self.audio_device_var.get())
+            except ValueError:
+                selected_audio_index = 0
 
             # Validate and update key delay setting
             key_delay_str = self.key_delay_var.get().strip()
@@ -677,6 +728,7 @@ class SettingsDialog:
             self.config.set_setting('always_on_top', self.always_on_top_var.get())
             self.config.set_setting('use_clipboard', self.use_clipboard_var.get())
             self.config.set_setting('keyboard_device', selected_keyboard_path)
+            self.config.set_setting('audio_device', self.audio_device_values[selected_audio_index])
 
             # Update model setting if changed
             new_model = self.model_var.get()
@@ -693,6 +745,16 @@ class SettingsDialog:
             if not self.config.save_config():
                 messagebox.showerror("Error", "Failed to save settings to file!")
                 return
+
+            # Apply audio device change immediately
+            selected_audio_device = self.audio_device_values[selected_audio_index]
+            if self.app_instance and hasattr(self.app_instance, 'audio_capture'):
+                set_result = self.app_instance.audio_capture.set_device(selected_audio_device)
+                if not set_result and selected_audio_device is not None:
+                    messagebox.showwarning(
+                        "Audio Device",
+                        "Selected microphone could not be activated. Using previous device."
+                    )
 
             # Update parent window's always on top setting
             self.parent.attributes('-topmost', self.always_on_top_var.get())
@@ -758,6 +820,11 @@ class SettingsDialog:
             # Update other settings
             self.config.set_setting('always_on_top', self.always_on_top_var.get())
             self.config.set_setting('use_clipboard', self.use_clipboard_var.get())
+            try:
+                selected_audio_index = self.audio_device_options.index(self.audio_device_var.get())
+            except ValueError:
+                selected_audio_index = 0
+            self.config.set_setting('audio_device', self.audio_device_values[selected_audio_index])
 
             # Save configuration
             if self.config.save_config():
@@ -771,6 +838,8 @@ class SettingsDialog:
                 # Call the update callback to refresh main window display
                 if self.update_callback:
                     self.update_callback()
+                    if self.app_instance and hasattr(self.app_instance, 'audio_capture'):
+                        self.app_instance.audio_capture.set_device(self.audio_device_values[selected_audio_index])
 
                 messagebox.showinfo("Settings", "Settings applied successfully!")
                 self._close_dialog()
@@ -793,6 +862,8 @@ class SettingsDialog:
                 self.always_on_top_var.set(self.config.get_setting('always_on_top'))
                 self.key_delay_var.set(str(self.config.get_setting('key_delay')))
                 self.use_clipboard_var.set(self.config.get_setting('use_clipboard'))
+                if hasattr(self, 'audio_device_var') and self.audio_device_options:
+                    self.audio_device_var.set(self.audio_device_options[0])
 
                 # Update the current shortcut display in the dialog
                 if self.current_shortcut_label:
@@ -883,6 +954,7 @@ class WhisperTuxApp:
         self.waveform_visualizer = None
         self.model_combo = None
         self.shortcut_display_label = None
+        self.audio_device_display_label = None
 
         # Initialize GUI
         self._setup_gui()
@@ -1088,6 +1160,21 @@ class WhisperTuxApp:
             bootstyle=INFO
         )
         self.key_delay_display_label.pack(side=LEFT, padx=(5, 0))
+
+        # Microphone info
+        mic_info_frame = ttk.Frame(settings_info_frame)
+        mic_info_frame.pack(fill=X, pady=1)
+
+        ttk.Label(mic_info_frame, text="Microphone:", font=("Arial", 9)).pack(side=LEFT)
+        self.audio_device_display_label = ttk.Label(
+            mic_info_frame,
+            text=self._get_current_audio_device_name(),
+            font=("Arial", 9, "bold"),
+            bootstyle=INFO,
+            wraplength=220,
+            justify=LEFT
+        )
+        self.audio_device_display_label.pack(side=LEFT, padx=(5, 0))
 
 
     def _create_audio_section(self):
@@ -1443,6 +1530,12 @@ class WhisperTuxApp:
             key_delay = self.config.get_setting('key_delay', 15)
             self.key_delay_display_label.config(text=f"{key_delay}ms")
             print(f"Updated key delay display to: {key_delay}ms")
+
+        # Update microphone display
+        if self.audio_device_display_label:
+            current_mic = self._get_current_audio_device_name()
+            self.audio_device_display_label.config(text=current_mic)
+            print(f"Updated microphone display to: {current_mic}")
 
     def _show_error(self, message):
         """Show error message"""

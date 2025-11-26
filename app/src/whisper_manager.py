@@ -145,6 +145,7 @@ class WhisperManager:
     def _run_whisper(self, audio_file_path: str) -> str:
         """Run whisper.cpp on the given audio file"""
         try:
+            threads = self.config.get_setting('transcription_threads', 4)
             # Construct whisper.cpp command
             cmd = [
                 str(self.whisper_binary),
@@ -152,7 +153,7 @@ class WhisperManager:
                 '-f', audio_file_path,
                 '--output-txt',
                 '--language', 'en',
-                '--threads', '4'
+                '--threads', str(threads)
             ]
             
             # Run the command
@@ -266,6 +267,24 @@ class WhisperManager:
                         if model_name not in available_models:
                             available_models.append(model_name)
                             model_paths[model_name] = str(model_file)
+                        break
+
+            # Special handling for large-v3-turbo with alternate naming conventions
+            if 'large-v3-turbo' not in available_models:
+                turbo_patterns = [
+                    # Standard naming
+                    model_dir / "ggml-large-v3-turbo.bin",
+                    model_dir / "ggml-large-v3-turbo.en.bin",
+                    # Alternate naming (used by dsnote, etc.)
+                    model_dir / "multilang_whisper_large3_turbo.ggml",
+                    model_dir / "whisper_large3_turbo.ggml",
+                    model_dir / "large-v3-turbo.ggml",
+                    model_dir / "ggml-large-v3-turbo.ggml",
+                ]
+                for turbo_file in turbo_patterns:
+                    if turbo_file.exists():
+                        available_models.append('large-v3-turbo')
+                        model_paths['large-v3-turbo'] = str(turbo_file)
                         break
 
             # Recursively scan for ggml-model.bin files (finetunes)
