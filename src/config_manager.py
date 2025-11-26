@@ -15,7 +15,7 @@ class ConfigManager:
     def __init__(self):
         # Default configuration values
         self.default_config = {
-            'primary_shortcut': 'F12',
+            'primary_shortcut': 'F13',
             'model': 'base',
             'key_delay': 15,  # Delay between keystrokes in milliseconds for ydotool
             'use_clipboard': False,
@@ -106,18 +106,18 @@ class ConfigManager:
     
     def get_whisper_model_path(self, model_name: str) -> Path:
         """Get the path to a whisper model file"""
-        # Construct path relative to the project root
-        project_root = Path(__file__).parent.parent
-        
+        # Use centralized model directory
+        model_dir = Path.home() / "ai" / "models" / "stt" / "whisper-cpp"
+
         # Handle different model naming conventions
         if model_name.endswith('.en'):
             # English-only model
             model_filename = f"ggml-{model_name}.bin"
         else:
             # Multilingual model - check both .en.bin and .bin versions
-            en_model_path = project_root / "whisper.cpp" / "models" / f"ggml-{model_name}.en.bin"
-            multi_model_path = project_root / "whisper.cpp" / "models" / f"ggml-{model_name}.bin"
-            
+            en_model_path = model_dir / f"ggml-{model_name}.en.bin"
+            multi_model_path = model_dir / f"ggml-{model_name}.bin"
+
             # Prefer English-only version if both exist
             if en_model_path.exists():
                 return en_model_path
@@ -126,24 +126,30 @@ class ConfigManager:
             else:
                 # Default to English-only path for error messages
                 return en_model_path
-        
-        model_path = project_root / "whisper.cpp" / "models" / model_filename
+
+        model_path = model_dir / model_filename
         return model_path
-    
+
     def get_whisper_binary_path(self) -> Path:
         """Get the path to the whisper binary"""
-        project_root = Path(__file__).parent.parent
-        # Check a few possible locations for the whisper binary
+        import shutil
+
+        # First check if whisper-cli is in PATH (preferred)
+        whisper_cli = shutil.which("whisper-cli")
+        if whisper_cli:
+            return Path(whisper_cli)
+
+        # Fallback to common locations
         possible_paths = [
-            project_root / "whisper.cpp" / "build" / "bin" / "whisper-cli",
-            project_root / "whisper.cpp" / "main",
-            project_root / "whisper.cpp" / "whisper"
+            Path.home() / ".local" / "bin" / "whisper-cli",
+            Path("/usr/local/bin/whisper-cli"),
+            Path("/usr/bin/whisper-cli"),
         ]
-        
+
         for path in possible_paths:
             if path.exists():
                 return path
-                
+
         # Return the most likely path even if it doesn't exist yet
         return possible_paths[0]
     

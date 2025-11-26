@@ -1,0 +1,16 @@
+[Unit]
+Description=ydotool daemon
+Documentation=man:ydotoold(8)
+Wants=systemd-udev-settle.service
+After=systemd-udev-settle.service
+
+[Service]
+Type=simple
+Restart=always
+ExecStart=/usr/bin/ydotoold
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+TimeoutSec=180
+
+[Install]
+WantedBy=multi-user.target
