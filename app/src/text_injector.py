@@ -41,7 +41,11 @@ class TextInjector:
 
     def inject_text(self, text: str) -> bool:
         """
-        Inject text into the currently focused application
+        Inject text into the currently focused application.
+
+        Always copies to clipboard first as a backup, then attempts ydotool
+        injection for direct text entry. If ydotool fails or no focused text
+        field exists, the text is still available via Ctrl+V.
 
         Args:
             text: Text to inject
@@ -55,17 +59,26 @@ class TextInjector:
 
         # Preprocess the text to handle unwanted carriage returns and speech-to-text corrections
         processed_text = self._preprocess_text(text)
-        
+
         try:
-            # Try ydotool first if available
+            # Always copy to clipboard first as a backup
+            # This ensures text is never lost even if ydotool injection fails
+            # (e.g., no focused text field, cursor not in an input, etc.)
+            self._copy_to_clipboard(processed_text)
+
+            # Then try ydotool for direct text entry if available
             if self.ydotool_available:
-                return self._inject_via_ydotool(processed_text)
+                success = self._inject_via_ydotool(processed_text)
+                if not success:
+                    print("ydotool injection failed - text is available in clipboard (Ctrl+V)")
+                return success
             else:
-                # Fall back to clipboard method
-                return self._inject_via_clipboard(processed_text)
+                # ydotool not available - clipboard is the only option
+                print("Text copied to clipboard - paste with Ctrl+V")
+                return True
 
         except Exception as e:
-            print(f"Text injection failed: {e}")
+            print(f"Text injection failed: {e} - text may still be in clipboard")
             return False
 
     def _preprocess_text(self, text: str) -> str:
@@ -155,6 +168,15 @@ class TextInjector:
                 processed = re.sub(pattern, replacement, processed, flags=re.IGNORECASE)
         
         return processed
+
+    def _copy_to_clipboard(self, text: str) -> bool:
+        """Copy text to clipboard as a backup/fallback"""
+        try:
+            pyperclip.copy(text)
+            return True
+        except Exception as e:
+            print(f"Warning: Failed to copy to clipboard: {e}")
+            return False
 
     def _inject_via_ydotool(self, text: str) -> bool:
         """Inject text using ydotool with configurable --key-delay and raw text (no escaping)"""
