@@ -57,18 +57,21 @@ cat > "$DEB_DIR/usr/local/bin/whispertux" << 'EOF'
 # WhisperTux launcher
 
 INSTALL_DIR="/opt/whispertux"
-VENV_DIR="$INSTALL_DIR/.venv"
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/whispertux"
+VENV_DIR="$DATA_DIR/.venv"
+
+# Ensure data directory exists
+mkdir -p "$DATA_DIR"
 
 # Check if venv exists, create if not
 if [ ! -d "$VENV_DIR" ]; then
     echo "Setting up virtual environment..."
-    cd "$INSTALL_DIR"
     if command -v uv &> /dev/null; then
         uv venv "$VENV_DIR"
-        uv pip install -r requirements.txt
+        uv pip install --python "$VENV_DIR/bin/python" -r "$INSTALL_DIR/requirements.txt"
     else
         python3 -m venv "$VENV_DIR"
-        "$VENV_DIR/bin/pip" install -r requirements.txt
+        "$VENV_DIR/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
     fi
 fi
 
@@ -143,8 +146,10 @@ set -e
 
 case "$1" in
     purge|remove)
-        # Remove venv created at runtime
-        rm -rf /opt/whispertux/.venv 2>/dev/null || true
+        # Note: User data in ~/.local/share/whispertux is preserved
+        # Users can manually remove it if desired
+        echo "Note: User data in ~/.local/share/whispertux has been preserved."
+        echo "Remove manually if no longer needed."
         ;;
 esac
 

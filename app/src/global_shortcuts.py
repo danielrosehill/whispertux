@@ -132,11 +132,14 @@ class GlobalShortcuts:
         """Convert a key string to evdev keycode"""
         key_string = key_string.lower().strip()
         
-        # Function keys
+        # Function keys (F1-F24)
         function_key_map = {
             'f1': ecodes.KEY_F1, 'f2': ecodes.KEY_F2, 'f3': ecodes.KEY_F3, 'f4': ecodes.KEY_F4,
             'f5': ecodes.KEY_F5, 'f6': ecodes.KEY_F6, 'f7': ecodes.KEY_F7, 'f8': ecodes.KEY_F8,
-            'f9': ecodes.KEY_F9, 'f10': ecodes.KEY_F10, 'f11': ecodes.KEY_F11, 'f12': ecodes.KEY_F12
+            'f9': ecodes.KEY_F9, 'f10': ecodes.KEY_F10, 'f11': ecodes.KEY_F11, 'f12': ecodes.KEY_F12,
+            'f13': ecodes.KEY_F13, 'f14': ecodes.KEY_F14, 'f15': ecodes.KEY_F15, 'f16': ecodes.KEY_F16,
+            'f17': ecodes.KEY_F17, 'f18': ecodes.KEY_F18, 'f19': ecodes.KEY_F19, 'f20': ecodes.KEY_F20,
+            'f21': ecodes.KEY_F21, 'f22': ecodes.KEY_F22, 'f23': ecodes.KEY_F23, 'f24': ecodes.KEY_F24
         }
         
         # Modifier keys

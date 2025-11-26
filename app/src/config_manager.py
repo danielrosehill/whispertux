@@ -155,8 +155,10 @@ class ConfigManager:
     
     def get_temp_directory(self) -> Path:
         """Get the temporary directory for audio files"""
-        temp_dir = Path(__file__).parent.parent / "temp"
-        temp_dir.mkdir(exist_ok=True)
+        # Use XDG data directory for user-writable temp files
+        data_home = os.environ.get('XDG_DATA_HOME', str(Path.home() / '.local' / 'share'))
+        temp_dir = Path(data_home) / 'whispertux' / 'temp'
+        temp_dir.mkdir(parents=True, exist_ok=True)
         return temp_dir
     
     def get_word_overrides(self) -> Dict[str, str]:
